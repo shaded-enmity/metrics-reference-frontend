@@ -1,14 +1,21 @@
 import * as React from 'react';
 import {
   Card, CardTitle, CardBody, DescriptionList, DescriptionListTerm, DescriptionListDescription, DescriptionListGroup,
-  PageSection, Button, Modal, ModalVariant, TextInput, Toolbar, ToolbarContent, ToolbarItem, Wizard, Title,
-  ListItem, List
+  PageSection, Button, TextInput, Toolbar, ToolbarContent, ToolbarItem, Wizard, Title,
+  ListItem, List, Spinner
 } from '@patternfly/react-core';
 import { TableComposable, Thead, Tr, Th, Tbody, Td } from '@patternfly/react-table';
-import { WarehouseIcon } from '@patternfly/react-icons/dist/esm/icons/warehouse-icon';
-import { TimesCircleIcon } from '@patternfly/react-icons/dist/esm/icons/times-circle-icon';
-import { SaveIcon } from '@patternfly/react-icons/dist/esm/icons/save-icon';
+import { WarehouseIcon, TimesCircleIcon, SaveIcon } from '@patternfly/react-icons';
+import { useQuery, QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { AnalyticsBrowser } from '@segment/analytics-next'
+import axios from 'axios';
 
+
+const analytics = AnalyticsBrowser.load({
+  writeKey: process.env.SEGMENT_KEY ?? 'invalid-api-key'
+})
+const qc = new QueryClient();
+const API_URL = 'http://localhost:1337'
 
 interface ShoppingListItem {
   name: string;
@@ -16,12 +23,12 @@ interface ShoppingListItem {
 }
 
 interface PurchaseInfo {
-  vendor: string;
+  providerId: string;
   purchasedAt: string;
 }
 
 interface ShoppingList {
-  id: number;
+  id: string;
   name: string;
   items: ShoppingListItem[];
   lastPurchase?: PurchaseInfo;
@@ -29,47 +36,12 @@ interface ShoppingList {
 }
 
 interface ShoppingProvider {
+  id: string;
   name: string;
   description: string | JSX.Element;
   priceBias: number;
   sameDayDelivery: boolean;
 }
-
-const lists: ShoppingList[] = [
-  {
-    id: 1,
-    name: 'Weekdays',
-    items: [
-      { name: 'Apples, Red', amount: 4 },
-      { name: 'Bread, Sliced', amount: 2 },
-      { name: 'Butter, Unsalted', amount: 1 }
-    ],
-    lastPurchase: { vendor: 'Walmart', purchasedAt: 'March 21st 2023, 3:32 pm' },
-    updatedAt: 'March 15th 2023, 8:21 pm'
-  },
-  {
-    id: 2,
-    name: 'Weekend',
-    items: [
-      { name: 'Apples, Red', amount: 4 },
-      { name: 'Bread, Sliced', amount: 2 },
-    ],
-    lastPurchase: { vendor: 'Amazon', purchasedAt: 'March 21st 2023, 3:32 pm' },
-    updatedAt: 'March 15th 2023, 8:21 pm'
-  },
-  {
-    id: 3,
-    name: 'Party Night',
-    items: [
-      { name: 'Apples, Red', amount: 4 },
-      { name: 'Bread, Sliced', amount: 2 },
-      { name: 'Apples, Red', amount: 4 },
-      { name: 'Bread, Sliced', amount: 2 },
-    ],
-    lastPurchase: { vendor: 'Uber', purchasedAt: 'March 21st 2023, 3:32 pm' },
-    updatedAt: 'March 15th 2023, 8:21 pm'
-  },
-];
 
 const columnNames = {
   name: 'Name',
@@ -77,13 +49,6 @@ const columnNames = {
   updatedAt: 'Updated At',
   lastPurchase: 'Last Purchase',
 };
-
-const providers: ShoppingProvider[] = [
-  { name: 'Amazon', description: 'You want it, they have it.', priceBias: 1.25, sameDayDelivery: true },
-  { name: 'Walmart', description: 'Pickup or delivery, your choice.', priceBias: 1.2, sameDayDelivery: false },
-  { name: 'Uber', description: 'Anything, anytime.', priceBias: 1.8, sameDayDelivery: true },
-  { name: 'Brněnka', description: 'Ultimate shopping experience.', priceBias: 1.1, sameDayDelivery: false },
-];
 
 /**
   Convert user specified amount to a number, or return `null` if:
@@ -110,12 +75,19 @@ const ItemAmountChange = ({ item, setHasError }: { item: ShoppingListItem, setHa
       onChange={(val) => {
         setAmount(val);
         const newAmount = toAmount(val);
+
         if (newAmount == null) {
           setValidation('error');
           setHasError(true);
         } else {
           setValidation('default');
           setHasError(false);
+
+          analytics.track('Update Item Amount', {
+            item: item.name,
+            delta: newAmount - item.amount,
+          })
+
           item.amount = newAmount;
         }
       }}
@@ -128,20 +100,20 @@ const OverviewStep = ({ list }: { list: ShoppingList }) => {
     <Title headingLevel='h1'>ShoppingList Overview</Title>
     <br />
     <List>
-      {list.items.map(item => <ListItem>{item.amount}x {item.name}</ListItem>)}
+      {list.items.map((item, idx) => <ListItem key={`overview-${idx}`}>{item.amount}x {item.name}</ListItem>)}
     </List>
   </React.Fragment>;
 };
 
-const ProviderStep = ({ setProvider }: { setProvider: (_: ShoppingProvider) => void }) => {
+const ProviderStep = ({ setProvider, providers }: { setProvider: (_: ShoppingProvider) => void, providers: ShoppingProvider[] }) => {
   const [selected, setSelected] = React.useState<string>("");
   const renderProvider = (provider: ShoppingProvider, index: number) => (
     <Card key={`provider-${index}`}
       hasSelectableInput isSelectableRaised
       isSelected={provider.name === selected}
       onClick={() => {
-        setSelected(provider.name);
-        setProvider(provider)
+        setSelected(provider.id);
+        setProvider(provider);
       }}
     >
       <CardTitle>
@@ -204,7 +176,7 @@ const ReviewStep = ({ list, provider }: { list: ShoppingList, provider: Shopping
   </React.Fragment>;
 };
 
-const ItemList = ({ list }: { list: ShoppingList }) => {
+const ItemList = ({ list, providers }: { list: ShoppingList, providers: ShoppingProvider[] }) => {
   const [removed, setRemoved] = React.useState<number[]>([]);
   const [isAppending, setIsAppending] = React.useState(false);
   const [newName, setNewName] = React.useState<string>("");
@@ -221,7 +193,7 @@ const ItemList = ({ list }: { list: ShoppingList }) => {
 
   const steps = [
     { name: 'Overview', component: <OverviewStep list={list} /> },
-    { name: 'Choose Provider', component: <ProviderStep setProvider={setProvider} /> },
+    { name: 'Choose Provider', component: <ProviderStep setProvider={setProvider} providers={providers} /> },
     { name: 'Review', component: <ReviewStep list={list} provider={provider} />, nextButtonText: 'Purchase' }
   ];
 
@@ -236,7 +208,7 @@ const ItemList = ({ list }: { list: ShoppingList }) => {
       </Thead>
       <Tbody>
         {list.items.map((item, rowIndex) => !removed.includes(rowIndex) && (
-          <Tr>
+          <Tr key={`list-${item.name}-${rowIndex}`}>
             <Td>{item.name}</Td>
             <Td>
               <ItemAmountChange item={item} setHasError={(v) => v ? setNumError(numError + 1) : setNumError(numError - 1)} />
@@ -256,8 +228,16 @@ const ItemList = ({ list }: { list: ShoppingList }) => {
               <Button title='Confirm adding new item' variant='link' onClick={() => {
                 const amount = toAmount(newAmount);
                 if (amount == null) { alert(`Value ${newAmount} is not a number`); return; }
-                list.items.push({ name: newName, amount: parseInt(newAmount) });
+                list.items.push({ name: newName, amount });
                 reset();
+
+                analytics.track('Add List Item', {
+                  list: list.id,
+                  item: {
+                    name: newName,
+                    amount
+                  },
+                });
               }}>Confirm</Button>
               {' '}
               <Button variant='link' title='Cancel' onClick={reset}>Cancel</Button></Td>
@@ -277,38 +257,91 @@ const ItemList = ({ list }: { list: ShoppingList }) => {
               return;
             }
             const updated = list.items.filter((_, i) => !removed.includes(i));
+
+            analytics.track('Update List', {
+              list: list.id,
+              deltas: {
+                items: updated.length - list.items.length,
+                amount: updated.reduce((p, c) => p + c.amount, 0) - list.items.reduce((p, c) => p + c.amount, 0),
+              }
+            });
+
             list.items = updated;
 
-            setTimeout(() => alert(JSON.stringify(updated, undefined, '   ')), 1000 * Math.random());
+            axios
+              .post(`${API_URL}/list/update`, { id: list.id, items: updated, name: list.name })
+              .then(_ => alert(`Shopping list "${list.name}" was updated`));
           }} isDisabled={isAppending}><SaveIcon /> Save</Button>
         </ToolbarItem>
-        <ToolbarItem alignment={{ default: 'alignRight' }}><Button variant='secondary' isDisabled={isAppending} onClick={() => setPurchaseVisible(true)}>$ Purchase</Button></ToolbarItem>
+        <ToolbarItem alignment={{ default: 'alignRight' }}>
+          <Button variant='secondary' isDisabled={isAppending} onClick={() => setPurchaseVisible(true)}>
+            $ Purchase
+          </Button>
+        </ToolbarItem>
       </ToolbarContent>
     </Toolbar>
-    <Modal variant={ModalVariant.large} isOpen={purchaseVisible} onClose={() => setPurchaseVisible(false)} hasNoBodyWrapper showClose={false}>
-      <Wizard
-        title="Make Purchase"
-        description={`Follow ${steps.length} simple steps to make your purchase`}
-        steps={steps}
-        onClose={() => setPurchaseVisible(false)}
-        height={400}
-        onSave={() => {
-          setPurchaseVisible(false);
-          setTimeout(() => alert('Your purchase is being processed'), 1000 * Math.random());
-        }}
-      />
-    </Modal>
+    <Wizard
+      title="Make Purchase"
+      description={`Follow ${steps.length} simple steps to make your purchase`}
+      steps={steps}
+      onClose={() => setPurchaseVisible(false)}
+      isOpen={purchaseVisible}
+      height={400}
+      onSave={() => {
+        setPurchaseVisible(false);
+
+        analytics.track('Make Purchase', {
+          list: list.id,
+          provider: provider?.id,
+        });
+
+        axios
+          .post(
+            `${API_URL}/purchase`,
+            { listId: list.id, providerId: provider?.id, }
+          )
+          .then(_ => alert("Your purchase was placed in the queue"));
+      }}
+    />
   </React.Fragment>;
 };
 
+interface TypedQueryResult<T> {
+  isLoading: boolean;
+  error: null | Error;
+  data: undefined | T;
+}
 
-const MyLists: React.FunctionComponent = () => {
+const parseJson = <T,>(r: Response): T | undefined => {
+  return r.json() as T;
+};
+
+const ShoppingListTable: React.FunctionComponent = () => {
   const [expanded, setExpanded] = React.useState<string[]>([]);
 
   const isExpanded = (name: string) => expanded.includes(name);
   const expand = (name: string) => setExpanded(Array.from(new Set([...expanded, name])));
   const unexpand = (name: string) => setExpanded(expanded.filter(v => v !== name));
   const toggle = (name: string) => isExpanded(name) ? unexpand(name) : expand(name);
+
+  const {
+    isLoading: providersLoading,
+    error: providersError,
+    data: providersData
+  }: TypedQueryResult<ShoppingProvider[]> = useQuery({
+    queryKey: ['providers'],
+    queryFn: () => fetch(`${API_URL}/providers`).then(parseJson),
+  });
+
+  const { isLoading, error, data }: TypedQueryResult<ShoppingList[]> = useQuery({
+    queryKey: ['shoppingList'],
+    queryFn: () => fetch(`${API_URL}/`).then(parseJson),
+  });
+
+  const loading = () => providersLoading || isLoading;
+  const errors = () => providersError || error;
+
+  const getProviderName = (providerId: string) => providersData?.find(v => v.id === providerId)?.name
 
   return (
     <PageSection>
@@ -333,38 +366,47 @@ const MyLists: React.FunctionComponent = () => {
             <Th>{columnNames.lastPurchase}</Th>
           </Tr>
         </Thead>
-        {lists.map((listInfo, rowIndex) => (
+        {loading() && <Spinner isSVG />}
+        {!loading() && errors() && `Error: ${errors()?.message}`}
+        {!loading() && providersData && data?.map((listInfo, rowIndex) => (
           <Tbody key={listInfo.name} isExpanded={isExpanded(listInfo.name)}>
             <Tr>
               <Td
-                expand={
-                  {
-                    rowIndex,
-                    isExpanded: isExpanded(listInfo.name),
-                    onToggle: () => toggle(listInfo.name),
-                    expandId: 'shoppinglist-expand'
-                  }
-                }
+                expand={{
+                  rowIndex,
+                  isExpanded: isExpanded(listInfo.name),
+                  onToggle: () => toggle(listInfo.name),
+                  expandId: 'shoppinglist-expand'
+                }}
               />
               <Td dataLabel={columnNames.name}><b>{listInfo.name}</b></Td>
               <Td dataLabel={columnNames.numItems}>{listInfo.items.length}</Td>
               <Td dataLabel={columnNames.updatedAt}>{listInfo.updatedAt}</Td>
               <Td dataLabel={columnNames.lastPurchase}>
                 {listInfo.lastPurchase &&
-                  <React.Fragment>
-                    <WarehouseIcon />{' '}<b>{listInfo.lastPurchase.vendor}</b> at {listInfo.lastPurchase.purchasedAt}
-                  </React.Fragment>}
+                  <>
+                    <WarehouseIcon />{' '}<b>{getProviderName(listInfo.lastPurchase.providerId)}</b> at {listInfo.lastPurchase.purchasedAt.split('.')[0]}
+                  </>}
               </Td>
             </Tr>
             <Tr isExpanded={isExpanded(listInfo.name)}>
               <Td colSpan={5} dataLabel={`expanded-${listInfo.name}`}>
-                <ItemList list={listInfo} />
+                <ItemList list={listInfo} providers={providersData} />
               </Td>
             </Tr>
           </Tbody>
         ))}
       </TableComposable>
     </PageSection>
+  );
+};
+
+
+const MyLists: React.FunctionComponent = () => {
+  return (
+    <QueryClientProvider client={qc}>
+      <ShoppingListTable />
+    </QueryClientProvider>
   )
 };
 
